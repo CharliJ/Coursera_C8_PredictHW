@@ -1,0 +1,132 @@
+---
+title: 'Class 8: Practical Machine Learning - Prediction'
+author: "C. Jeltema"
+date: "May 5, 2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, eval=FALSE)
+```
+
+## Executive Summary
+
+Accelerometers were used to measure six participants performing bicep curls with dumbbells at five quality levels (A-E), yielding a data set containing nearly 20,000 measurement sets. The goal was to determine if a model could be fit to predict the bicep quality level with a high accuracy level, based on the accelerometer measurements. It was found that many of the accelerometer measurements varied insubstantially, making them unsuitable for model fitting.  These measurements were not used in model evaluations. Several modeling approaches were evaluated. Random forest modeling yielded the best model fit on the training and validation sets, and was deemd an appropriate approach for this data set. Background information regarding the data set may be found at the following web address: http://web.archive.org/web/20161224072740/http:/groupware.les.inf.puc-rio.br/har
+
+## Data Aquisition
+
+The data.table, caret, forecast libraries were loaded. The training and test data sets were aquired as shown below.
+
+```{r r1}
+library(data.table)
+library(caret)
+library(forecast)
+
+fileURL<- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+download.file(fileURL, destfile = "training.csv")
+
+fileURL<- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+download.file(fileURL, destfile = "testing.csv")
+
+training <- as.data.table(read.csv("training.csv", 
+                                   na.strings=c("","#DIV/0!","NA")))
+testing <- as.data.table(read.csv("testing.csv",
+                                  na.strings=c("","#DIV/0!","NA")))
+
+```
+
+## Data Partitioning
+
+The test set has enough measurement sets to partition into a sub training set and a validation set for later cross-validation. This was accomplished using the code below.  
+
+```{r r2}
+set.seed(8675309)
+trainIndex = createDataPartition(training$classe, p = 0.70,list=FALSE)
+trainsub = training[trainIndex,]
+Validation = training[-trainIndex,]
+```
+
+## Data Exploration and Predictor Selection
+
+Several plot were attempted during the data exploration phase, but given the number of variables, most were found to be too busy to be helpful. Instead, a simple examination of the structure (str(trainsub)) proved valuable. This showed that the first seven variables were labels, time stamps, etc., that would have no bearing in the model prediction, and could be removed.  It also indidcated that several of the variables perhaps did not vary substantially, and that other variables had many "NA" values. There was not a good way to impute the NA values, given the classified nature of the data, so these variables were also selected for removal.
+
+The first seven variables, and the variables that do not vary enough or have too many missing values to be useful in developing a model were eliminated as shown below.
+
+```{r r3}
+dadata<-trainsub[,8:length(trainsub)] # removes labels, timestamps
+
+nearZeroVar(dadata, saveMetrics=TRUE) #shows that many of the variables don't have much variation - most variation %unique values.  pitch, yaw, roll, and magnet forearms data vary the most
+
+# removes variables that have fewer than 5 unique values (don't vary enough)
+uq<-lengths(lapply(dadata, unique))
+null_names<-names(uq[uq<5])
+dadata[,null_names]<-NULL #*****
+
+# removes variables that contain too many NAs
+try4<-dadata[,lapply(.SD,function(x) {sum(is.na(x)/.N)*100}),by=classe] #calcs %NA
+try5<-(try4[,-1][,lapply(.SD,min)])#finds minimum %NA in all classes per variable
+try6<-melt(try5)
+try6<-try6[order(value)]
+min_na<-min(try6$value[try6$value > 0]) # finds minimum value of NA that's not 0 overall - less than 3% real data per class
+min_names<-as.character(try6[value>=min_na,variable]) #gets names of vars with too many NAs
+dadata[,min_names]<-NULL #****
+```
+
+Given the background information provided with the data set and the variable names, it was reasonable to suspect that many of the variables would be correlated to each other, negatively impacting the model fitting process.  The existance of correlated variables was confirmed, identified with an 0.8 cut-off, and addressed as shown below.
+
+```{r r4}
+#confirms that many variables are correlated to each other
+M<-abs(cor(dadata[,-53]))
+diag(M)<-0
+which(M>0.8,arr.ind=T)
+
+table(dadata$classe)/nrow(dadata)*100 #somewhat evenly distributed between classes
+
+#Remove highly correlated variables
+cordadata<-cor(dadata[,-53])
+highlycor<-findCorrelation(cordadata,cutoff=0.8)
+noncor_dadata<-as.data.table(as.data.frame(dadata[,-53])[,-highlycor])
+noncor_dadata<-cbind(noncor_dadata,dadata$classe)
+setnames(noncor_dadata,c("V2"),c("classe"))
+mynames<-names(noncor_dadata) #names of "keeper" variables for model fitting
+```
+
+## Model Fitting
+
+The model types appropriate for classification data were considered. Linear Discriminant Analaysis (lda), Bagged CART (treebag), and Random Forest (rf) models were selected for evaluaion. As shown below, the random forest model yielded the best accuracy.
+
+```{r r5}
+modelfit_lda<-train(classe~.,method="lda",data=noncor_dadata)
+confusionMatrix(modelfit_lda) #0.64
+
+modelfit_tb<-train(classe~.,method="treebag",data=noncor_dadata)
+confusionMatrix(modelfit_tb) #0.97
+
+modelfit_rf<-train(classe~.,method="rf",data=noncor_dadata) 
+confusionMatrix(modelfit_rf) #0.987
+```
+
+## Model Validation
+
+The validation data partitioned from the training data had the same variables removed as the training data subset that was used to develop the model. The model was run on the validation data set, with a 99% out-of-sample accuracy.
+
+```{r r6}
+noncor_valid<-Validation[,..mynames] #remove the variables not used in the model fit
+validfit_rf<-predict(modelfit_rf,noncor_valid)
+confusionMatrix(validfit_rf,noncor_valid_y$classe) #0.994
+```
+
+## Model Application
+
+The same procedure use in the model validation was applied to the testing dataset, with the exception that the "answers" (classe) were not available. The accuracy against the test data was 100% (quiz results).
+
+```{r r7}
+mynames2<-mynames[-43]
+noncor_test<-testing[,..mynames2]
+testfit_rf<-predict(modelfit_rf,noncor_test)
+```
+
+## Summary & Conclusions
+
+The original data set contained several variables that were not useful for model fitting, due to data type, lack of variation, or amount of missing values.  Only 42 of the original 159 provided variables were used in the final model fitting.  Random forest modeling was the most accurate of the fits evaluated, with a >99% out-of-sample accuracy.  The random forest model took significant time to fit, and could be sped up if required.
+
